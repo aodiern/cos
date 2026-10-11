@@ -345,14 +345,6 @@ function ClusterTrace({
   return (
     <div className="bg-white rounded-xl border border-slate-200 p-4 overflow-x-auto">
       <h2 className="font-semibold text-slate-800 mb-1">{title}</h2>
-      <p className="text-sm text-slate-500 mb-4">
-        Расстояния — косинусное подобие. Поиск максимума в матрице. Размер кластера R = {threshold}.
-        Объединение, пока максимум ≥ R.
-      </p>
-      <p className="text-sm mb-4">
-        Итоговые кластеры:{' '}
-        <span className="font-medium">{run.clusters.map((name) => `{${name}}`).join('  ')}</span>
-      </p>
       <div className="space-y-6">
         {run.steps.map((step, index) => (
           <div key={`${title}-${index}`}>
