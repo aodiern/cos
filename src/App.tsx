@@ -6,6 +6,7 @@ import {
   PairSimilarity,
   takeFirst,
 } from './math';
+import { clusterByThreshold, ClusterRun, ClusterStep } from './cluster';
 import { parsePreferenceText } from './parseMatrix';
 
 const defaultUsers = ['U1', 'U2', 'U3', 'U4', 'U5'];
@@ -36,8 +37,12 @@ function App() {
   const [results, setResults] = useState<{
     topProducts: PairSimilarity[];
     topUsers: PairSimilarity[];
+    userClusters: ClusterRun;
+    productClusters: ClusterRun;
+    threshold: number;
   } | null>(null);
   const [error, setError] = useState('');
+  const [thresholdInput, setThresholdInput] = useState('0.85');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const updateCell = (row: number, col: number, value: string) => {
@@ -94,12 +99,26 @@ function App() {
   };
 
   const calculate = () => {
+    const R = Number(thresholdInput.replace(',', '.'));
+    if (Number.isNaN(R)) {
+      setError('Порог R должен быть числом');
+      return;
+    }
+    if (users.length < 2 || products.length < 2) {
+      setError('Нужно минимум 2 пользователя и 2 продукта');
+      return;
+    }
+
     setError('');
     const productPairs = allPairSimilarities(matrix, products);
-    const userPairs = allPairSimilarities(allColumnVectors(matrix), users);
+    const userVectors = allColumnVectors(matrix);
+    const userPairs = allPairSimilarities(userVectors, users);
     setResults({
       topProducts: takeFirst(productPairs, 2),
       topUsers: takeFirst(userPairs, 2),
+      userClusters: clusterByThreshold(users, userVectors, R),
+      productClusters: clusterByThreshold(products, matrix, R),
+      threshold: R,
     });
   };
 
@@ -165,6 +184,18 @@ function App() {
               accept=".csv,.tsv,.txt"
               onChange={handleFileUpload}
               className="hidden"
+            />
+          </label>
+          <label className="flex items-center gap-2 px-3 py-2 bg-white border border-slate-200 rounded-lg text-slate-700">
+            R
+            <input
+              type="number"
+              step="0.01"
+              min="-1"
+              max="1"
+              value={thresholdInput}
+              onChange={(e) => setThresholdInput(e.target.value)}
+              className="w-20 text-center border-b border-slate-300 focus:border-indigo-400 focus:outline-none"
             />
           </label>
           <button
@@ -253,9 +284,22 @@ function App() {
         </div>
 
         {results && (
-          <div className="grid sm:grid-cols-2 gap-6">
-            <ResultList title="Близкие продукты" pairs={results.topProducts} />
-            <ResultList title="Близкие пользователи" pairs={results.topUsers} />
+          <div className="space-y-6">
+            <div className="grid sm:grid-cols-2 gap-6">
+              <ResultList title="Близкие продукты" pairs={results.topProducts} />
+              <ResultList title="Близкие пользователи" pairs={results.topUsers} />
+            </div>
+
+            <ClusterTrace
+              title="Кластеры пользователей"
+              run={results.userClusters}
+              threshold={results.threshold}
+            />
+            <ClusterTrace
+              title="Кластеры продуктов"
+              run={results.productClusters}
+              threshold={results.threshold}
+            />
           </div>
         )}
       </main>
@@ -267,17 +311,100 @@ function ResultList({ title, pairs }: { title: string; pairs: PairSimilarity[] }
   return (
     <div className="bg-white rounded-xl border border-slate-200 p-4">
       <h2 className="font-semibold text-slate-800 mb-3">{title}</h2>
-      <ol className="space-y-2">
-        {pairs.map((pair, idx) => (
-          <li key={`${pair.name1}-${pair.name2}`} className="flex justify-between gap-3">
-            <span>
-              {idx + 1}. {pair.name1} – {pair.name2}
-            </span>
-            <span className="font-mono">{pair.similarity.toFixed(4)}</span>
-          </li>
-        ))}
-      </ol>
+      {pairs.length === 0 ? (
+        <p className="text-sm text-slate-500">Нет пар для сравнения</p>
+      ) : (
+        <ol className="space-y-2">
+          {pairs.map((pair, idx) => (
+            <li key={`${pair.name1}-${pair.name2}`} className="flex justify-between gap-3">
+              <span>
+                {idx + 1}. {pair.name1} – {pair.name2}
+              </span>
+              <span className="font-mono">{pair.similarity.toFixed(4)}</span>
+            </li>
+          ))}
+        </ol>
+      )}
     </div>
+  );
+}
+
+function ClusterTrace({
+  title,
+  run,
+  threshold,
+}: {
+  title: string;
+  run: ClusterRun;
+  threshold: number;
+}) {
+  if (run.steps.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-4 overflow-x-auto">
+      <h2 className="font-semibold text-slate-800 mb-1">{title}</h2>
+      <p className="text-sm text-slate-500 mb-4">
+        Расстояния — косинусное подобие. Поиск максимума в матрице. Размер кластера R = {threshold}.
+        Объединение, пока максимум ≥ R.
+      </p>
+      <p className="text-sm mb-4">
+        Итоговые кластеры:{' '}
+        <span className="font-medium">{run.clusters.map((name) => `{${name}}`).join('  ')}</span>
+      </p>
+      <div className="space-y-6">
+        {run.steps.map((step, index) => (
+          <div key={`${title}-${index}`}>
+            <p className="text-sm text-slate-600 mb-2">
+              {index === 0 ? 'Исходная матрица расстояний' : `${index}. Перестройка матрицы расстояний`}. {step.description}
+            </p>
+            <SimilarityTable step={step} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SimilarityTable({ step }: { step: ClusterStep }) {
+
+  return (
+    <table className="border-collapse text-sm">
+      <thead>
+        <tr>
+          <th className="border border-slate-200 px-2 py-1 bg-slate-50" />
+          {step.labels.map((label) => (
+            <th key={label} className="border border-slate-200 px-2 py-1 bg-slate-50 font-medium">
+              {label}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {step.matrix.map((row, i) => (
+          <tr key={step.labels[i]}>
+            <th className="border border-slate-200 px-2 py-1 bg-slate-50 text-left font-medium">
+              {step.labels[i]}
+            </th>
+            {row.map((value, j) => {
+              const isMax = step.maxI === i && step.maxJ === j;
+              const hidden = j < i;
+              return (
+                <td
+                  key={`${i}-${j}`}
+                  className={`border border-slate-200 px-2 py-1 text-center font-mono ${
+                    isMax ? 'bg-yellow-200 font-semibold' : ''
+                  }`}
+                >
+                  {hidden ? '' : value.toFixed(2)}
+                </td>
+              );
+            })}
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 

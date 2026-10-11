@@ -17,7 +17,7 @@ export interface PairSimilarity {
 }
 
 /** A · B = A1*B1 + A2*B2 + ... + An*Bn */
-function dotProduct(a: number[], b: number[]): number {
+export function dotProduct(a: number[], b: number[]): number {
   let sum = 0;
   for (let i = 0; i < a.length; i++) {
     sum += a[i] * b[i];
@@ -26,12 +26,20 @@ function dotProduct(a: number[], b: number[]): number {
 }
 
 /** ‖A‖ = √(A1² + A2² + ... + An²) */
-function vectorNorm(a: number[]): number {
+export function vectorNorm(a: number[]): number {
   let sumSquares = 0;
   for (let i = 0; i < a.length; i++) {
     sumSquares += a[i] * a[i];
   }
   return Math.sqrt(sumSquares);
+}
+
+export function cosineSimilarity(a: number[], b: number[]): number {
+  const denom = vectorNorm(a) * vectorNorm(b);
+  if (denom === 0) {
+    return 0;
+  }
+  return dotProduct(a, b) / denom;
 }
 
 function pairSimilarity(
@@ -43,8 +51,7 @@ function pairSimilarity(
   const dot = dotProduct(a, b);
   const normA = vectorNorm(a);
   const normB = vectorNorm(b);
-  const denominator = normA * normB;
-  const similarity = denominator === 0 ? 0 : dot / denominator;
+  const similarity = cosineSimilarity(a, b);
 
   return { name1, name2, similarity, dot, normA, normB };
 }
