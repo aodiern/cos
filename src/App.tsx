@@ -1,49 +1,61 @@
-import React, { useRef, useState } from 'react';
-import {
-  allColumnVectors,
-  allPairSimilarities,
-  copyMatrix,
-  PairSimilarity,
-  takeFirst,
-} from './math';
-import { clusterByThreshold, ClusterRun, ClusterStep } from './cluster';
+import React, { useMemo, useRef, useState } from 'react';
+import { copyMatrix } from './math';
 import { parsePreferenceText } from './parseMatrix';
+import {
+  filterPreferenceMatrix,
+  formatVector,
+  meanNonZero,
+  toCoo,
+  toCsr,
+  toEllpack,
+} from './sparse';
 
 const defaultUsers = ['U1', 'U2', 'U3', 'U4', 'U5'];
 const defaultProducts = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6'];
 
+/** Матрица предпочтений 0 из задания 3 */
 const exampleCsv = `,U1,U2,U3,U4,U5
-P1,5,4,5,3,5
-P2,5,5,5,3,5
-P3,5,4,4,2,5
-P4,5,3,5,0,3
-P5,5,0,5,0,0
-P6,4,5,5,3,1
+P1,5,4,5,0,5
+P2,5,5,5,0,5
+P3,5,4,4,0,5
+P4,4,3,4,0,3
+P5,0,0,0,0,0
+P6,4,5,5,0,1
 `;
 
 const defaultMatrix = [
-  [5, 4, 5, 3, 5],
-  [5, 5, 5, 3, 5],
-  [5, 4, 4, 2, 5],
-  [5, 3, 5, 0, 3],
-  [5, 0, 5, 0, 0],
-  [4, 5, 5, 3, 1],
+  [5, 4, 5, 0, 5],
+  [5, 5, 5, 0, 5],
+  [5, 4, 4, 0, 5],
+  [4, 3, 4, 0, 3],
+  [0, 0, 0, 0, 0],
+  [4, 5, 5, 0, 1],
 ];
 
 function App() {
   const [users, setUsers] = useState<string[]>(defaultUsers);
   const [products, setProducts] = useState<string[]>(defaultProducts);
   const [matrix, setMatrix] = useState<number[][]>(defaultMatrix);
-  const [results, setResults] = useState<{
-    topProducts: PairSimilarity[];
-    topUsers: PairSimilarity[];
-    userClusters: ClusterRun;
-    productClusters: ClusterRun;
-    threshold: number;
-  } | null>(null);
   const [error, setError] = useState('');
-  const [thresholdInput, setThresholdInput] = useState('0.85');
+  const [lowRatingInput, setLowRatingInput] = useState('4');
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const lowRatingThreshold = Number(lowRatingInput.replace(',', '.'));
+  const lowRatingValid = !Number.isNaN(lowRatingThreshold);
+
+  const coo = useMemo(() => toCoo(matrix), [matrix]);
+  const csr = useMemo(() => toCsr(matrix), [matrix]);
+  const ell = useMemo(() => toEllpack(matrix), [matrix]);
+  const productMeans = useMemo(
+    () => matrix.map((row) => meanNonZero(row)),
+    [matrix],
+  );
+  const filtered = useMemo(() => {
+    if (!lowRatingValid) return null;
+    return filterPreferenceMatrix(products, users, matrix, {
+      lowRatingThreshold,
+    });
+  }, [products, users, matrix, lowRatingThreshold, lowRatingValid]);
 
   const updateCell = (row: number, col: number, value: string) => {
     const next = copyMatrix(matrix);
@@ -67,59 +79,38 @@ function App() {
   const addUser = () => {
     setUsers([...users, `U${users.length + 1}`]);
     setMatrix(matrix.map((row) => [...row, 0]));
-    setResults(null);
   };
 
   const addProduct = () => {
     setProducts([...products, `P${products.length + 1}`]);
     setMatrix([...matrix, users.map(() => 0)]);
-    setResults(null);
   };
 
   const removeUser = (index: number) => {
-    if (users.length <= 2) {
-      setError('Нужно минимум 2 пользователя');
+    if (users.length <= 1) {
+      setError('Нужен минимум 1 пользователь');
       return;
     }
     setError('');
     setUsers(users.filter((_, i) => i !== index));
     setMatrix(matrix.map((row) => row.filter((_, j) => j !== index)));
-    setResults(null);
   };
 
   const removeProduct = (index: number) => {
-    if (products.length <= 2) {
-      setError('Нужно минимум 2 продукта');
+    if (products.length <= 1) {
+      setError('Нужен минимум 1 продукт');
       return;
     }
     setError('');
     setProducts(products.filter((_, i) => i !== index));
     setMatrix(matrix.filter((_, i) => i !== index));
-    setResults(null);
   };
 
-  const calculate = () => {
-    const R = Number(thresholdInput.replace(',', '.'));
-    if (Number.isNaN(R)) {
-      setError('Порог R должен быть числом');
-      return;
-    }
-    if (users.length < 2 || products.length < 2) {
-      setError('Нужно минимум 2 пользователя и 2 продукта');
-      return;
-    }
-
+  const resetExample = () => {
+    setProducts([...defaultProducts]);
+    setUsers([...defaultUsers]);
+    setMatrix(copyMatrix(defaultMatrix));
     setError('');
-    const productPairs = allPairSimilarities(matrix, products);
-    const userVectors = allColumnVectors(matrix);
-    const userPairs = allPairSimilarities(userVectors, users);
-    setResults({
-      topProducts: takeFirst(productPairs, 2),
-      topUsers: takeFirst(userPairs, 2),
-      userClusters: clusterByThreshold(users, userVectors, R),
-      productClusters: clusterByThreshold(products, matrix, R),
-      threshold: R,
-    });
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -137,7 +128,6 @@ function App() {
       setProducts(parsed.products);
       setUsers(parsed.users);
       setMatrix(parsed.matrix);
-      setResults(null);
     };
     reader.readAsText(file);
 
@@ -159,8 +149,8 @@ function App() {
   return (
     <div className="min-h-screen bg-slate-50">
       <main className="max-w-5xl mx-auto px-4 py-8">
-        <h1 className="text-2xl font-bold text-slate-800 mb-6">
-          Косинусное сходство
+        <h1 className="text-2xl font-bold text-slate-800 mb-2">
+          Хранение разреженных матриц
         </h1>
 
         <div className="flex flex-wrap gap-3 mb-4">
@@ -186,24 +176,22 @@ function App() {
               className="hidden"
             />
           </label>
+          <button
+            onClick={resetExample}
+            className="px-3 py-2 bg-white border border-slate-200 rounded-lg text-slate-700 hover:bg-slate-100"
+          >
+            Сбросить пример
+          </button>
           <label className="flex items-center gap-2 px-3 py-2 bg-white border border-slate-200 rounded-lg text-slate-700">
-            R
+            Низкий рейтинг &lt;
             <input
               type="number"
-              step="0.01"
-              min="-1"
-              max="1"
-              value={thresholdInput}
-              onChange={(e) => setThresholdInput(e.target.value)}
-              className="w-20 text-center border-b border-slate-300 focus:border-indigo-400 focus:outline-none"
+              step="0.1"
+              value={lowRatingInput}
+              onChange={(e) => setLowRatingInput(e.target.value)}
+              className="w-16 text-center border-b border-slate-300 focus:border-indigo-400 focus:outline-none"
             />
           </label>
-          <button
-            onClick={calculate}
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium ml-auto"
-          >
-            Рассчитать
-          </button>
         </div>
 
         {error && (
@@ -213,7 +201,7 @@ function App() {
         <div className="bg-white rounded-xl border border-slate-200 p-4 mb-4">
           <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
             <p className="text-sm text-slate-600">
-              Пример файла CSV: первая строка — пользователи, первый столбец — продукты
+              Матрица предпочтений 0 (задание 3). MID — среднее ненулевых оценок.
             </p>
             <button
               onClick={downloadExample}
@@ -246,6 +234,7 @@ function App() {
                     </button>
                   </th>
                 ))}
+                <th className="px-3 py-2 text-sm text-slate-500">MID</th>
               </tr>
             </thead>
             <tbody>
@@ -277,126 +266,192 @@ function App() {
                       />
                     </td>
                   ))}
+                  <td className="px-3 py-2 text-center font-mono text-sm text-slate-600">
+                    {productMeans[i].toFixed(1).replace('.', ',')}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
 
-        {results && (
-          <div className="space-y-6">
-            <div className="grid sm:grid-cols-2 gap-6">
-              <ResultList title="Близкие продукты" pairs={results.topProducts} />
-              <ResultList title="Близкие пользователи" pairs={results.topUsers} />
-            </div>
+        <section className="space-y-4 mb-10">
+          <h2 className="text-xl font-semibold text-slate-800">Структуры хранения</h2>
 
-            <ClusterTrace
-              title="Кластеры пользователей"
-              run={results.userClusters}
-              threshold={results.threshold}
-            />
-            <ClusterTrace
-              title="Кластеры продуктов"
-              run={results.productClusters}
-              threshold={results.threshold}
-            />
+          <SparseBlock
+            title="1. value, row, col"
+            description="Каждый ненулевой элемент хранится тройкой (значение, строка, столбец)."
+          >
+            <ArrayLine label="Value" values={coo.value} />
+            <ArrayLine label="Row" values={coo.row} />
+            <ArrayLine label="Col" values={coo.col} />
+          </SparseBlock>
+
+          <SparseBlock
+            title="2. value, col, rowIndex"
+            description="Ненулевые по строкам; rowIndex[i] — начало строки i в массивах value/col."
+          >
+            <ArrayLine label="Value" values={csr.value} />
+            <ArrayLine label="Col" values={csr.col} />
+            <ArrayLine label="RowIndex" values={csr.rowIndex} />
+          </SparseBlock>
+
+          <SparseBlock
+            title="3. ELLPACK"
+            description={`Две матрицы размера ${ell.value.length}×${ell.maxNonZeros}: значения и индексы столбцов (паддинг нулями).`}
+          >
+            <div className="grid sm:grid-cols-2 gap-4">
+              <EllTable title="Value" data={ell.value} rowLabels={products} />
+              <EllTable title="Column" data={ell.column} rowLabels={products} />
+            </div>
+          </SparseBlock>
+
+          <div className="bg-white rounded-xl border border-slate-200 p-4">
+            <h3 className="font-semibold text-slate-800 mb-1">
+              4. Исключение товаров и пользователей
+            </h3>
+            <p className="text-sm text-slate-500 mb-3">
+              Автоматически: нулевой рейтинг, низкий рейтинг (MID &lt;{' '}
+              {lowRatingValid ? lowRatingThreshold : '…'}) и неактивные пользователи.
+            </p>
+            {!filtered ? (
+              <p className="text-sm text-red-600">Порог низкого рейтинга должен быть числом</p>
+            ) : (
+              <>
+                <div className="text-sm text-slate-600 mb-3 space-y-1">
+                  <p>
+                    Удалены товары:{' '}
+                    {filtered.removedProducts.length
+                      ? filtered.removedProducts.join(', ')
+                      : '—'}
+                  </p>
+                  <p>
+                    Удалены пользователи:{' '}
+                    {filtered.removedUsers.length
+                      ? filtered.removedUsers.join(', ')
+                      : '—'}
+                  </p>
+                </div>
+                <p className="text-sm font-medium text-slate-700 mb-2">
+                  Матрица предпочтений 1
+                </p>
+                {filtered.matrix.length === 0 || filtered.users.length === 0 ? (
+                  <p className="text-sm text-slate-500">После фильтрации матрица пуста</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="border-collapse text-sm">
+                      <thead>
+                        <tr>
+                          <th className="border border-slate-200 px-2 py-1 bg-slate-50" />
+                          {filtered.users.map((user) => (
+                            <th
+                              key={user}
+                              className="border border-slate-200 px-2 py-1 bg-slate-50 font-medium"
+                            >
+                              {user}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filtered.matrix.map((row, i) => (
+                          <tr key={filtered.products[i]}>
+                            <th className="border border-slate-200 px-2 py-1 bg-slate-50 text-left font-medium">
+                              {filtered.products[i]}
+                            </th>
+                            {row.map((value, j) => (
+                              <td
+                                key={`${i}-${j}`}
+                                className="border border-slate-200 px-2 py-1 text-center font-mono"
+                              >
+                                {value}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </>
+            )}
           </div>
-        )}
+        </section>
       </main>
     </div>
   );
 }
 
-function ResultList({ title, pairs }: { title: string; pairs: PairSimilarity[] }) {
-  return (
-    <div className="bg-white rounded-xl border border-slate-200 p-4">
-      <h2 className="font-semibold text-slate-800 mb-3">{title}</h2>
-      {pairs.length === 0 ? (
-        <p className="text-sm text-slate-500">Нет пар для сравнения</p>
-      ) : (
-        <ol className="space-y-2">
-          {pairs.map((pair, idx) => (
-            <li key={`${pair.name1}-${pair.name2}`} className="flex justify-between gap-3">
-              <span>
-                {idx + 1}. {pair.name1} – {pair.name2}
-              </span>
-              <span className="font-mono">{pair.similarity.toFixed(4)}</span>
-            </li>
-          ))}
-        </ol>
-      )}
-    </div>
-  );
-}
-
-function ClusterTrace({
+function SparseBlock({
   title,
-  run,
-  threshold,
+  description,
+  children,
 }: {
   title: string;
-  run: ClusterRun;
-  threshold: number;
+  description: string;
+  children: React.ReactNode;
 }) {
-  if (run.steps.length === 0) {
-    return null;
-  }
-
   return (
-    <div className="bg-white rounded-xl border border-slate-200 p-4 overflow-x-auto">
-      <h2 className="font-semibold text-slate-800 mb-1">{title}</h2>
-      <div className="space-y-6">
-        {run.steps.map((step, index) => (
-          <div key={`${title}-${index}`}>
-            <p className="text-sm text-slate-600 mb-2">
-              {index === 0 ? 'Исходная матрица расстояний' : `${index}. Перестройка матрицы расстояний`}. {step.description}
-            </p>
-            <SimilarityTable step={step} />
-          </div>
-        ))}
-      </div>
+    <div className="bg-white rounded-xl border border-slate-200 p-4">
+      <h3 className="font-semibold text-slate-800 mb-1">{title}</h3>
+      <p className="text-sm text-slate-500 mb-3">{description}</p>
+      <div className="space-y-2 font-mono text-sm overflow-x-auto">{children}</div>
     </div>
   );
 }
 
-function SimilarityTable({ step }: { step: ClusterStep }) {
-
+function ArrayLine({ label, values }: { label: string; values: number[] }) {
   return (
-    <table className="border-collapse text-sm">
-      <thead>
-        <tr>
-          <th className="border border-slate-200 px-2 py-1 bg-slate-50" />
-          {step.labels.map((label) => (
-            <th key={label} className="border border-slate-200 px-2 py-1 bg-slate-50 font-medium">
-              {label}
-            </th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {step.matrix.map((row, i) => (
-          <tr key={step.labels[i]}>
-            <th className="border border-slate-200 px-2 py-1 bg-slate-50 text-left font-medium">
-              {step.labels[i]}
-            </th>
-            {row.map((value, j) => {
-              const isMax = step.maxI === i && step.maxJ === j;
-              const hidden = j < i;
-              return (
-                <td
-                  key={`${i}-${j}`}
-                  className={`border border-slate-200 px-2 py-1 text-center font-mono ${
-                    isMax ? 'bg-yellow-200 font-semibold' : ''
-                  }`}
-                >
-                  {hidden ? '' : value.toFixed(2)}
-                </td>
-              );
-            })}
+    <p>
+      <span className="text-slate-500 mr-2">{label}:</span>
+      <span className="text-slate-800">{formatVector(values)}</span>
+    </p>
+  );
+}
+
+function EllTable({
+  title,
+  data,
+  rowLabels,
+}: {
+  title: string;
+  data: number[][];
+  rowLabels: string[];
+}) {
+  if (data.length === 0) {
+    return <p className="text-sm text-slate-500">{title}: пусто</p>;
+  }
+  const cols = data[0]?.length ?? 0;
+  return (
+    <div>
+      <p className="text-sm font-sans text-slate-600 mb-2">{title}</p>
+      <table className="border-collapse text-sm">
+        <thead>
+          <tr>
+            <th className="border border-slate-200 px-2 py-1 bg-slate-50" />
+            {Array.from({ length: cols }, (_, k) => (
+              <th key={k} className="border border-slate-200 px-2 py-1 bg-slate-50">
+                {k}
+              </th>
+            ))}
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {data.map((row, i) => (
+            <tr key={i}>
+              <th className="border border-slate-200 px-2 py-1 bg-slate-50 text-left font-sans font-medium">
+                {rowLabels[i] ?? i}
+              </th>
+              {row.map((v, j) => (
+                <td key={j} className="border border-slate-200 px-2 py-1 text-center">
+                  {v}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
