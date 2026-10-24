@@ -1,32 +1,17 @@
-/**
- * User-based рекомендации (задание 4).
- *
- *   Pr_a,i = r̄_a + Σ_u∈K (r_u,i − r̄_u) · cos(a,u) / Σ_u∈K |cos(a,u)|
- *
- * r̄ — среднее ненулевых оценок пользователя.
- * K — соседи с cos(a,u) ≥ R, оценившие товар i.
- * Товар рекомендуют только если Pr ≥ порога рекомендации.
- * Оценка 0 считается «не оценён» (кандидат на рекомендацию).
- */
-
-import { allColumnVectors, cosineSimilarity } from './math';
+import { cosineSimilarity } from './math';
 
 export interface RecommendOptions {
-  /** Порог сходства: сосед входит в K при cos ≥ R */
   R?: number;
-  /** Минимальный Pr (или средний рейтинг при cold start), чтобы рекомендовать */
   recommendThreshold?: number;
 }
 
-/** Один сосед u в формуле Pr для пары (a, i) */
 export interface PrNeighborTerm {
-  user: string;
-  userIndex: number;
+  product: string;
+  productIndex: number;
   rating: number;
-  mean: number;
   similarity: number;
-  /** (r_u,i − r̄_u) · cos(a,u) */
-  weightedDeviation: number;
+  /** r_a,j · cos(i,j) */
+  weightedRating: number;
 }
 
 /** Полный разбор расчёта Pr_a,i */
@@ -35,13 +20,12 @@ export interface PrBreakdown {
   userIndex: number;
   product: string;
   productIndex: number;
-  meanA: number;
   R: number;
   neighbors: PrNeighborTerm[];
   numerator: number;
   denominator: number;
-  /** r̄_a, если нет соседей в K */
-  usedFallbackMean: boolean;
+  /** нет соседей в K */
+  usedFallback: boolean;
   predicted: number;
 }
 
@@ -56,26 +40,21 @@ export interface CandidatePrediction {
 export interface UserRecommendation {
   user: string;
   userIndex: number;
-  mean: number;
-  /** Новый пользователь: все оценки == 0 */
   coldStart: boolean;
-  /** Товар с наибольшим предсказанием (или со средним при cold start) */
   product: string | null;
   productIndex: number | null;
   predicted: number | null;
-  /** Разбор Pr для рекомендованного (или лучшего) товара */
   breakdown: PrBreakdown | null;
-  /** Все предсказания для неоценённых товаров (включая ниже порога) */
   candidates: CandidatePrediction[];
   reason: string;
 }
 
-export interface UserBasedResult {
+export interface ItemBasedResult {
   users: string[];
   products: string[];
-  /** Матрица косинусного сходства пользователей (диагональ 0) */
+  /** Матрица косинусного сходства товаров (диагональ 0) */
   similarity: number[][];
-  means: number[];
+  productMeans: number[];
   maxI: number;
   maxJ: number;
   maxSimilarity: number;
@@ -86,7 +65,6 @@ export interface UserBasedResult {
 
 const EPS = 1e-12;
 
-/** Среднее ненулевых оценок; 0 если оценок нет. */
 export function meanNonZero(ratings: number[]): number {
   let sum = 0;
   let count = 0;
@@ -99,26 +77,21 @@ export function meanNonZero(ratings: number[]): number {
   return count === 0 ? 0 : sum / count;
 }
 
-export function isNewUser(ratings: number[]): boolean {
-  return ratings.every((value) => value === 0);
+export function isNewUser(column: number[]): boolean {
+  return column.every((value) => value === 0);
 }
 
-/** Средний рейтинг товара по всем ненулевым оценкам. */
-export function productMeanNonZero(matrix: number[][], productIndex: number): number {
-  return meanNonZero(matrix[productIndex] ?? []);
-}
-
-export function userSimilarityMatrix(userVectors: number[][]): number[][] {
-  const n = userVectors.length;
-  const matrix: number[][] = [];
+export function itemSimilarityMatrix(matrix: number[][]): number[][] {
+  const n = matrix.length;
+  const similarity: number[][] = [];
   for (let i = 0; i < n; i++) {
-    matrix[i] = [];
+    similarity[i] = [];
     for (let j = 0; j < n; j++) {
-      matrix[i][j] =
-        i === j ? 0 : cosineSimilarity(userVectors[i], userVectors[j]);
+      similarity[i][j] =
+        i === j ? 0 : cosineSimilarity(matrix[i], matrix[j]);
     }
   }
-  return matrix;
+  return similarity;
 }
 
 export function findMaxSimilarityPair(similarity: number[][]): {
@@ -145,100 +118,70 @@ export function findMaxSimilarityPair(similarity: number[][]): {
   return { i: maxI, j: maxJ, value: maxValue };
 }
 
-/**
- * Предсказание рейтинга пользователя a для товара i с разбором формулы.
- * В K входят пользователи с cos(a,u) ≥ R, у которых оценка товара ≠ 0.
- */
-export function predictUserBasedRatingDetailed(
+export function predictItemBasedRatingDetailed(
   userIndex: number,
   productIndex: number,
   products: string[],
   users: string[],
   matrix: number[][],
-  means: number[],
   similarity: number[][],
   R: number,
 ): PrBreakdown {
-  const meanA = means[userIndex];
   const neighbors: PrNeighborTerm[] = [];
   let numerator = 0;
   let denominator = 0;
 
-  for (let u = 0; u < users.length; u++) {
-    if (u === userIndex) {
+  for (let j = 0; j < products.length; j++) {
+    if (j === productIndex) {
       continue;
     }
-    const rating = matrix[productIndex][u];
+    const rating = matrix[j][userIndex];
     if (rating === 0) {
       continue;
     }
-    const sim = similarity[userIndex][u];
+    const sim = similarity[productIndex][j];
     if (sim + EPS < R) {
       continue;
     }
-    const weightedDeviation = (rating - means[u]) * sim;
+    const weightedRating = rating * sim;
     neighbors.push({
-      user: users[u],
-      userIndex: u,
+      product: products[j],
+      productIndex: j,
       rating,
-      mean: means[u],
       similarity: sim,
-      weightedDeviation,
+      weightedRating,
     });
-    numerator += weightedDeviation;
+    numerator += weightedRating;
     denominator += Math.abs(sim);
   }
 
-  const usedFallbackMean = denominator === 0;
-  const predicted = usedFallbackMean ? meanA : meanA + numerator / denominator;
+  const usedFallback = denominator === 0;
+  const predicted = usedFallback ? 0 : numerator / denominator;
 
   return {
     user: users[userIndex],
     userIndex,
     product: products[productIndex],
     productIndex,
-    meanA,
     R,
     neighbors,
     numerator,
     denominator,
-    usedFallbackMean,
+    usedFallback,
     predicted,
   };
 }
 
-export function predictUserBasedRating(
-  userIndex: number,
-  productIndex: number,
-  matrix: number[][],
-  userVectors: number[][],
-  means: number[],
-  similarity: number[][],
-  R: number,
-): number {
-  const users = userVectors.map((_, i) => `U${i}`);
-  const products = matrix.map((_, i) => `P${i}`);
-  return predictUserBasedRatingDetailed(
-    userIndex,
-    productIndex,
-    products,
-    users,
-    matrix,
-    means,
-    similarity,
-    R,
-  ).predicted;
+function userColumn(matrix: number[][], userIndex: number): number[] {
+  return matrix.map((row) => row[userIndex]);
 }
 
 function recommendColdStart(
   user: string,
   userIndex: number,
   products: string[],
-  matrix: number[][],
+  productMeans: number[],
 ): UserRecommendation {
-  /** Средние рейтинги всех товаров (по ненулевым оценкам). */
-  const productMeans = products.map((_, i) => productMeanNonZero(matrix, i));
-
   let bestIndex = 0;
   let bestMean = Number.NEGATIVE_INFINITY;
   for (let i = 0; i < productMeans.length; i++) {
@@ -252,7 +195,6 @@ function recommendColdStart(
     return {
       user,
       userIndex,
-      mean: 0,
       coldStart: true,
       product: null,
       productIndex: null,
@@ -263,8 +205,6 @@ function recommendColdStart(
     };
   }
 
-  // Для нового пользователя порог Pr не применяется:
-  // всегда рекомендуем товар с наибольшим средним рейтингом.
   const candidates: CandidatePrediction[] = products.map((product, i) => ({
     product,
     productIndex: i,
@@ -275,12 +215,11 @@ function recommendColdStart(
       userIndex,
       product,
       productIndex: i,
-      meanA: 0,
       R: 0,
       neighbors: [],
       numerator: 0,
       denominator: 0,
-      usedFallbackMean: true,
+      usedFallback: true,
       predicted: productMeans[i],
     },
   }));
@@ -289,7 +228,6 @@ function recommendColdStart(
   return {
     user,
     userIndex,
-    mean: 0,
     coldStart: true,
     product: products[bestIndex],
     productIndex: bestIndex,
@@ -300,28 +238,27 @@ function recommendColdStart(
   };
 }
 
-export function recommendUserBased(
+export function recommendItemBased(
   products: string[],
   users: string[],
   matrix: number[][],
   options: RecommendOptions = {},
-): UserBasedResult {
+): ItemBasedResult {
   const R = options.R ?? 0;
   const recommendThreshold = options.recommendThreshold ?? 0;
 
-  const userVectors = allColumnVectors(matrix);
-  const similarity = userSimilarityMatrix(userVectors);
-  const means = userVectors.map((vector) => meanNonZero(vector));
+  const similarity = itemSimilarityMatrix(matrix);
+  const productMeans = matrix.map((row) => meanNonZero(row));
   const maxPair =
-    users.length >= 2
+    products.length >= 2
       ? findMaxSimilarityPair(similarity)
       : { i: 0, j: 0, value: 0 };
 
   const recommendations: UserRecommendation[] = users.map((user, userIndex) => {
-    const vector = userVectors[userIndex];
+    const column = userColumn(matrix, userIndex);
 
-    if (isNewUser(vector)) {
-      return recommendColdStart(user, userIndex, products, matrix);
+    if (isNewUser(column)) {
+      return recommendColdStart(user, userIndex, products, productMeans);
     }
 
     const candidates: CandidatePrediction[] = [];
@@ -329,13 +266,12 @@ export function recommendUserBased(
       if (matrix[productIndex][userIndex] !== 0) {
         continue;
       }
-      const breakdown = predictUserBasedRatingDetailed(
+      const breakdown = predictItemBasedRatingDetailed(
         userIndex,
         productIndex,
         products,
         users,
         matrix,
-        means,
         similarity,
         R,
       );
@@ -343,7 +279,9 @@ export function recommendUserBased(
         product: products[productIndex],
         productIndex,
         predicted: breakdown.predicted,
-        aboveThreshold: breakdown.predicted + EPS >= recommendThreshold,
+        aboveThreshold:
+          !breakdown.usedFallback &&
+          breakdown.predicted + EPS >= recommendThreshold,
         breakdown,
       });
     }
@@ -354,7 +292,6 @@ export function recommendUserBased(
       return {
         user,
         userIndex,
-        mean: means[userIndex],
         coldStart: false,
         product: null,
         productIndex: null,
@@ -371,14 +308,15 @@ export function recommendUserBased(
       return {
         user,
         userIndex,
-        mean: means[userIndex],
         coldStart: false,
         product: null,
         productIndex: null,
         predicted: best.predicted,
         breakdown: best.breakdown,
         candidates,
-        reason: `Лучший кандидат ${best.product} (Pr ≈ ${best.predicted.toFixed(4)}) ниже порога ${recommendThreshold}`,
+        reason: best.breakdown.usedFallback
+          ? `Нет похожих оценённых товаров (cos ≥ R) для предсказания`
+          : `Лучший кандидат ${best.product} (Pr ≈ ${best.predicted.toFixed(4)}) ниже порога ${recommendThreshold}`,
       };
     }
 
@@ -386,7 +324,6 @@ export function recommendUserBased(
     return {
       user,
       userIndex,
-      mean: means[userIndex],
       coldStart: false,
       product: best.product,
       productIndex: best.productIndex,
@@ -401,7 +338,7 @@ export function recommendUserBased(
     users,
     products,
     similarity,
-    means,
+    productMeans,
     maxI: maxPair.i,
     maxJ: maxPair.j,
     maxSimilarity: maxPair.value,

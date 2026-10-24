@@ -1,30 +1,29 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { copyMatrix } from './math';
 import { parsePreferenceText } from './parseMatrix';
-import { PrBreakdown, recommendUserBased } from './recommend';
+import { PrBreakdown, recommendItemBased } from './recommend';
 
 function fmt(value: number, digits = 4): string {
   return value.toFixed(digits).replace('.', ',');
 }
 
-const defaultUsers = ['U1', 'U2', 'U3', 'U4'];
+const defaultUsers = ['U1', 'U2', 'U3', 'U4', 'U5'];
 const defaultProducts = ['P1', 'P2', 'P3', 'P4', 'P5'];
 
-/** Матрица из задания 4 (USER-BASED) */
-const exampleCsv = `,U1,U2,U3,U4
-P1,5,5,4,5
-P2,5,5,3,0
-P3,5,5,5,5
-P4,5,0,2,0
-P5,0,5,1,0
+const exampleCsv = `,U1,U2,U3,U4,U5
+P1,5,5,4,5,4
+P2,5,5,3,0,3
+P3,5,5,5,5,0
+P4,5,0,5,5,5
+P5,0,5,1,0,2
 `;
 
 const defaultMatrix = [
-  [5, 5, 4, 5],
-  [5, 5, 3, 0],
-  [5, 5, 5, 5],
-  [5, 0, 2, 0],
-  [0, 5, 1, 0],
+  [5, 5, 4, 5, 4],
+  [5, 5, 3, 0, 3],
+  [5, 5, 5, 5, 0],
+  [5, 0, 5, 5, 5],
+  [0, 5, 1, 0, 2],
 ];
 
 const EPS = 1e-12;
@@ -33,7 +32,7 @@ function App() {
   const [users, setUsers] = useState<string[]>(defaultUsers);
   const [products, setProducts] = useState<string[]>(defaultProducts);
   const [matrix, setMatrix] = useState<number[][]>(defaultMatrix);
-  const [rInput, setRInput] = useState('0.6');
+  const [rInput, setRInput] = useState('0.85');
   const [thresholdInput, setThresholdInput] = useState('4');
   const [error, setError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -44,7 +43,7 @@ function App() {
 
   const result = useMemo(() => {
     if (!paramsValid) return null;
-    return recommendUserBased(products, users, matrix, {
+    return recommendItemBased(products, users, matrix, {
       R,
       recommendThreshold,
     });
@@ -103,7 +102,7 @@ function App() {
     setProducts([...defaultProducts]);
     setUsers([...defaultUsers]);
     setMatrix(copyMatrix(defaultMatrix));
-    setRInput('0.6');
+    setRInput('0.85');
     setThresholdInput('4');
     setError('');
   };
@@ -144,14 +143,57 @@ function App() {
   const formatSim = (value: number) =>
     Number.isFinite(value) ? value.toFixed(4).replace('.', ',') : '—';
 
+  const similarGroup = useMemo(() => {
+    if (!result || products.length < 2) {
+      return { indices: [] as number[], linkSim: 0 };
+    }
+    const { maxI, maxJ, similarity } = result;
+    const n = products.length;
+
+    let linkSim = Number.NEGATIVE_INFINITY;
+    for (let k = 0; k < n; k++) {
+      if (k === maxI || k === maxJ) continue;
+      linkSim = Math.max(linkSim, similarity[k][maxI], similarity[k][maxJ]);
+    }
+    if (!Number.isFinite(linkSim)) {
+      return { indices: [maxI, maxJ], linkSim: result.maxSimilarity };
+    }
+
+    const inGroup = new Set<number>([maxI, maxJ]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const i of [...inGroup]) {
+        for (let j = 0; j < n; j++) {
+          if (inGroup.has(j)) continue;
+          if (similarity[i][j] + EPS >= linkSim) {
+            inGroup.add(j);
+            changed = true;
+          }
+        }
+      }
+    }
+
+    const rest = [...inGroup]
+      .filter((i) => i !== maxI && i !== maxJ)
+      .sort((a, b) => {
+        const sa = Math.max(similarity[a][maxI], similarity[a][maxJ]);
+        const sb = Math.max(similarity[b][maxI], similarity[b][maxJ]);
+        return sb - sa || a - b;
+      });
+    return { indices: [maxI, maxJ, ...rest], linkSim };
+  }, [result, products.length]);
+
+  const similarProductIndices = similarGroup.indices;
+
   return (
     <div className="min-h-screen bg-slate-50">
       <main className="max-w-5xl mx-auto px-4 py-8">
         <h1 className="text-2xl font-bold text-slate-800 mb-1">
-          User-based рекомендации
+          Item-based рекомендации
         </h1>
         <p className="text-sm text-slate-500 mb-6">
-          Рекомендации продуктов по похожим предпочтениям пользователей
+          Рекомендации продуктов по похожим предпочтениям товаров/услуг
         </p>
 
         <div className="flex flex-wrap gap-3 mb-4">
@@ -283,21 +325,6 @@ function App() {
                   ))}
                 </tr>
               ))}
-              {result && (
-                <tr className="bg-slate-50">
-                  <td className="px-3 py-2 text-sm text-slate-500">
-                    r̄ (ненулевых)
-                  </td>
-                  {result.means.map((mean, j) => (
-                    <td
-                      key={j}
-                      className="px-2 py-2 text-center font-mono text-sm text-slate-700"
-                    >
-                      {mean.toFixed(2).replace('.', ',')}
-                    </td>
-                  ))}
-                </tr>
-              )}
             </tbody>
           </table>
         </div>
@@ -306,35 +333,37 @@ function App() {
           <section className="space-y-6 mb-10">
             <div className="bg-white rounded-xl border border-slate-200 p-4 overflow-x-auto">
               <h2 className="text-lg font-semibold text-slate-800 mb-1">
-                Матрица сходства пользователей
+                Матрица сходства товаров
               </h2>
               <p className="text-sm text-slate-500 mb-3">
-                cos(Ui, Uj). Жёлтым — максимум. Зелёным - пары с cos ≥ R = {formatSim(result.R)}.
+                cos(Pi, Pj). Жёлтым — максимум
+                {products.length >= 2
+                  ? ` (${products[result.maxI]}–${products[result.maxJ]} ≈ ${formatSim(result.maxSimilarity)})`
+                  : ''}
+                . Зелёным — пары с cos ≥ R = {formatSim(result.R)}.
               </p>
-              {users.length < 2 ? (
-                <p className="text-sm text-slate-500">
-                  Нужно минимум 2 пользователя
-                </p>
+              {products.length < 2 ? (
+                <p className="text-sm text-slate-500">Нужно минимум 2 продукта</p>
               ) : (
                 <table className="border-collapse text-sm">
                   <thead>
                     <tr>
                       <th className="border border-slate-200 px-2 py-1 bg-slate-50" />
-                      {users.map((user) => (
+                      {products.map((product) => (
                         <th
-                          key={user}
+                          key={product}
                           className="border border-slate-200 px-2 py-1 bg-slate-50 font-medium"
                         >
-                          {user}
+                          {product}
                         </th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {result.similarity.map((row, i) => (
-                      <tr key={users[i]}>
+                      <tr key={products[i]}>
                         <th className="border border-slate-200 px-2 py-1 bg-slate-50 text-left font-medium">
-                          {users[i]}
+                          {products[i]}
                         </th>
                         {row.map((value, j) => {
                           const isMax =
@@ -364,13 +393,95 @@ function App() {
               )}
             </div>
 
+            {products.length >= 2 && similarProductIndices.length > 0 && (
+              <div className="bg-white rounded-xl border border-slate-200 p-4 overflow-x-auto">
+                <h2 className="text-lg font-semibold text-slate-800 mb-1">
+                  Похожие товары
+                </h2>
+                <p className="text-sm text-slate-500 mb-3">
+                  Жёлтым — оценка 0 при наличии похожего оценённого товара в группе
+                  (кандидат на рекомендацию).
+                </p>
+                <table className="border-collapse text-sm">
+                  <thead>
+                    <tr>
+                      <th className="border border-slate-200 px-2 py-1 bg-slate-50" />
+                      {users.map((user) => (
+                        <th
+                          key={user}
+                          className="border border-slate-200 px-2 py-1 bg-slate-50 font-medium"
+                        >
+                          {user}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {similarProductIndices.map((pi) => (
+                      <tr key={products[pi]}>
+                        <th className="border border-slate-200 px-2 py-1 bg-slate-50 text-left font-medium">
+                          {products[pi]}
+                          {pi === result.maxI || pi === result.maxJ ? (
+                            <span className="ml-1 text-xs font-normal text-amber-700">
+                              max
+                            </span>
+                          ) : null}
+                        </th>
+                        {users.map((_, uj) => {
+                          const value = matrix[pi][uj];
+                          const highlight =
+                            value === 0 &&
+                            similarProductIndices.some(
+                              (oj) =>
+                                oj !== pi &&
+                                matrix[oj][uj] !== 0 &&
+                                result.similarity[pi][oj] + EPS >= result.R,
+                            );
+                          return (
+                            <td
+                              key={`${pi}-${uj}`}
+                              className={`border border-slate-200 px-2 py-1 text-center font-mono ${
+                                highlight ? 'bg-amber-200 font-semibold' : ''
+                              }`}
+                            >
+                              {value}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <p className="text-xs text-slate-500 mt-2">
+                  Пользователям с нулём у товара группы и ненулевой оценкой у
+                  похожего (cos ≥ R) можно рекомендовать недостающий товар
+                  {(() => {
+                    const hints: string[] = [];
+                    for (let uj = 0; uj < users.length; uj++) {
+                      for (const pi of similarProductIndices) {
+                        if (matrix[pi][uj] !== 0) continue;
+                        const hasNeighbor = similarProductIndices.some(
+                          (oj) =>
+                            oj !== pi &&
+                            matrix[oj][uj] !== 0 &&
+                            result.similarity[pi][oj] + EPS >= result.R,
+                        );
+                        if (hasNeighbor) {
+                          hints.push(`${users[uj]} → ${products[pi]}`);
+                        }
+                      }
+                    }
+                    return hints.length ? `: ${hints.join(', ')}` : '';
+                  })()}
+                  .
+                </p>
+              </div>
+            )}
+
             <div className="bg-white rounded-xl border border-slate-200 p-4">
               <h2 className="text-lg font-semibold text-slate-800 mb-1">
                 Рекомендации и расчёт Pr
               </h2>
-              <p className="text-sm text-slate-500 mb-3">
-                разбор формулы для каждого кандидата.
-              </p>
               <ul className="space-y-4">
                 {result.recommendations.map((rec) => (
                   <li
@@ -381,16 +492,15 @@ function App() {
                       <span className="font-semibold text-slate-800">
                         {rec.user}
                       </span>
-                      <span className="text-sm text-slate-500">
-                        r̄ = {fmt(rec.mean, 2)}
-                      </span>
                       {rec.product ? (
                         <span className="text-indigo-700">
                           → рекомендовать <strong>{rec.product}</strong>
                           {rec.predicted != null && (
                             <span className="text-slate-500 font-normal">
                               {' '}
-                              (Pr ≈ {fmt(rec.predicted)})
+                              {rec.coldStart
+                                ? `(MID ≈ ${fmt(rec.predicted)})`
+                                : `(Pr ≈ ${fmt(rec.predicted)})`}
                             </span>
                           )}
                         </span>
@@ -402,6 +512,10 @@ function App() {
                     {rec.coldStart && (
                       <div className="space-y-2">
                         <p className="text-sm text-slate-600">{rec.reason}</p>
+                        <p className="text-xs text-slate-500">
+                          Формула Pr по товарам не применяется. Берём товар с
+                          наибольшим средним рейтингом (MID).
+                        </p>
                         <div className="overflow-x-auto">
                           <table className="border-collapse text-sm font-mono">
                             <thead>
@@ -426,7 +540,9 @@ function App() {
                                 >
                                   <td className="border border-slate-200 px-2 py-1">
                                     {c.product}
-                                    {c.product === rec.product ? ' ← рекомендовать' : ''}
+                                    {c.product === rec.product
+                                      ? ' ← рекомендовать'
+                                      : ''}
                                   </td>
                                   <td className="border border-slate-200 px-2 py-1 text-center">
                                     {fmt(c.predicted, 4)}
@@ -469,8 +585,7 @@ function PrBreakdownCard({
   recommended: boolean;
 }) {
   const numParts = breakdown.neighbors.map(
-    (n) =>
-      `(${fmt(n.rating, 0)} − ${fmt(n.mean, 2)}) · ${fmt(n.similarity)}`,
+    (n) => `${fmt(n.rating, 0)} · ${fmt(n.similarity)}`,
   );
   const denParts = breakdown.neighbors.map((n) => `|${fmt(n.similarity)}|`);
 
@@ -486,7 +601,9 @@ function PrBreakdownCard({
         <span className="font-medium text-slate-800">
           Pr({breakdown.user}, {breakdown.product})
         </span>
-        <span className="font-mono text-slate-700">= {fmt(breakdown.predicted)}</span>
+        <span className="font-mono text-slate-700">
+          = {fmt(breakdown.predicted)}
+        </span>
         {recommended && (
           <span className="text-xs px-2 py-0.5 rounded bg-indigo-200 text-indigo-900">
             рекомендация
@@ -494,53 +611,52 @@ function PrBreakdownCard({
         )}
         {!aboveThreshold && (
           <span className="text-xs px-2 py-0.5 rounded bg-slate-200 text-slate-600">
-            ниже порога
+            ниже порога / нет K
           </span>
         )}
       </div>
 
-      {breakdown.usedFallbackMean ? (
+      {breakdown.usedFallback ? (
         <p className="text-sm text-slate-600">
-          Нет соседей с cos ≥ R = {fmt(breakdown.R, 2)}, у которых оценён{' '}
-          {breakdown.product}. Берём r̄<sub>a</sub> = {fmt(breakdown.meanA, 2)}.
+          Нет оценённых товаров j с cos({breakdown.product}, j) ≥ R ={' '}
+          {fmt(breakdown.R, 2)}. Предсказание недоступно (Pr = 0).
         </p>
       ) : (
         <div className="text-sm text-slate-700 space-y-2 font-mono overflow-x-auto">
           <p>
-            r̄<sub>a</sub> = {fmt(breakdown.meanA, 2)}, K ={' '}
-            {breakdown.neighbors.map((n) => n.user).join(', ')} (cos ≥{' '}
-            {fmt(breakdown.R, 2)})
+            K = {breakdown.neighbors.map((n) => n.product).join(', ')} (оценены
+            пользователем, cos ≥ {fmt(breakdown.R, 2)})
           </p>
           <div className="overflow-x-auto">
             <table className="border-collapse text-xs mb-2">
               <thead>
                 <tr className="bg-slate-50">
-                  <th className="border border-slate-200 px-2 py-1">u</th>
-                  <th className="border border-slate-200 px-2 py-1">r<sub>u,i</sub></th>
-                  <th className="border border-slate-200 px-2 py-1">r̄<sub>u</sub></th>
-                  <th className="border border-slate-200 px-2 py-1">cos(a,u)</th>
+                  <th className="border border-slate-200 px-2 py-1">j</th>
                   <th className="border border-slate-200 px-2 py-1">
-                    (r<sub>u,i</sub> − r̄<sub>u</sub>)·cos
+                    r<sub>a,j</sub>
+                  </th>
+                  <th className="border border-slate-200 px-2 py-1">
+                    cos(i,j)
+                  </th>
+                  <th className="border border-slate-200 px-2 py-1">
+                    r<sub>a,j</sub>·cos
                   </th>
                 </tr>
               </thead>
               <tbody>
                 {breakdown.neighbors.map((n) => (
-                  <tr key={n.user}>
+                  <tr key={n.product}>
                     <td className="border border-slate-200 px-2 py-1 text-center">
-                      {n.user}
+                      {n.product}
                     </td>
                     <td className="border border-slate-200 px-2 py-1 text-center">
                       {fmt(n.rating, 0)}
                     </td>
                     <td className="border border-slate-200 px-2 py-1 text-center">
-                      {fmt(n.mean, 2)}
-                    </td>
-                    <td className="border border-slate-200 px-2 py-1 text-center">
                       {fmt(n.similarity)}
                     </td>
                     <td className="border border-slate-200 px-2 py-1 text-center">
-                      {fmt(n.weightedDeviation)}
+                      {fmt(n.weightedRating)}
                     </td>
                   </tr>
                 ))}
@@ -554,8 +670,8 @@ function PrBreakdownCard({
             знаменатель = {denParts.join(' + ')} = {fmt(breakdown.denominator)}
           </p>
           <p className="whitespace-pre-wrap break-all font-semibold text-slate-800">
-            Pr = {fmt(breakdown.meanA, 2)} + {fmt(breakdown.numerator)} /{' '}
-            {fmt(breakdown.denominator)} = {fmt(breakdown.predicted)}
+            Pr = {fmt(breakdown.numerator)} / {fmt(breakdown.denominator)} ={' '}
+            {fmt(breakdown.predicted)}
           </p>
         </div>
       )}
